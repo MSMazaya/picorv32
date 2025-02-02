@@ -87,16 +87,209 @@ module picosoc_eth (
   );
 endmodule
 
-module axi_bus (
-    input mem_valid,
-    input mem_instr,
-    input mem_ready,
+module axi_bus #(
+    parameter UART_ADDRESS   = 32'h1000_0000,
+    parameter MEMORY_ADDRESS = 32'h0000_0000
+) (
+    input               mem_axi_awvalid,
+    output logic        mem_axi_awready,
+    input        [31:0] mem_axi_awaddr,
+    input        [ 2:0] mem_axi_awprot,
 
-    input [31:0] mem_addr,
-    input [31:0] mem_wdata,
-    input [ 3:0] mem_wstrb,
-    input [31:0] mem_rdata
+    input               mem_axi_wvalid,
+    output logic        mem_axi_wready,
+    input        [31:0] mem_axi_wdata,
+    input        [ 3:0] mem_axi_wstrb,
+
+    output logic mem_axi_bvalid,
+    input        mem_axi_bready,
+
+    input               mem_axi_arvalid,
+    output logic        mem_axi_arready,
+    input        [31:0] mem_axi_araddr,
+    input        [ 2:0] mem_axi_arprot,
+
+    output logic        mem_axi_rvalid,
+    input               mem_axi_rready,
+    output logic [31:0] mem_axi_rdata,
+
+    input clk,
+    input resetn,
+
+    output logic uart_tx_out
 );
+
+  logic axi_uart_awready, axi_uart_wready, axi_uart_bvalid;
+  logic axi_uart_arready, axi_uart_rvalid;
+  logic [31:0] axi_uart_rdata;
+
+  logic axi_mem_awready, axi_mem_wready, axi_mem_bvalid;
+  logic axi_mem_arready, axi_mem_rvalid;
+  logic [31:0] axi_mem_rdata;
+
+  axi_uart #(
+      .BAUD_RATE(19600),
+      .CLOCK_FREQUENCY(100_000_000),
+      .UART_ADDRESS(UART_ADDRESS)
+  ) uart (
+      .clk(clk),
+      .resetn(resetn),
+
+      .awvalid(mem_axi_awvalid),
+      .awready(axi_uart_awready),
+      .awaddr (mem_axi_awaddr),
+      .awprot (mem_axi_awprot),
+
+      .wvalid(mem_axi_wvalid),
+      .wready(axi_uart_wready),
+      .wdata (mem_axi_wdata),
+      .wstrb (mem_axi_wstrb),
+
+      .bvalid(axi_uart_bvalid),
+      .bready(mem_axi_bready),
+
+      .arvalid(mem_axi_arvalid),
+      .arready(axi_uart_arready),
+      .araddr (mem_axi_araddr),
+      .arprot (mem_axi_arprot),
+
+      .rvalid(axi_uart_rvalid),
+      .rready(mem_axi_rready),
+      .rdata (axi_uart_rdata),
+
+      .tx_out(uart_tx_out)
+  );
+
+  axi_memory #(
+      .START_ADDRESS(MEMORY_ADDRESS),
+      .MEM_SIZE(4096)
+  ) memory (
+      .awvalid(mem_axi_awvalid),
+      .awready(axi_mem_awready),
+      .awaddr (mem_axi_awaddr),
+      .awprot (mem_axi_awprot),
+
+      .wvalid(mem_axi_wvalid),
+      .wready(axi_mem_wready),
+      .wdata (mem_axi_wdata),
+      .wstrb (mem_axi_wstrb),
+
+      .bvalid(axi_mem_bvalid),
+      .bready(mem_axi_bready),
+
+      .arvalid(mem_axi_arvalid),
+      .arready(axi_mem_arready),
+      .araddr (mem_axi_araddr),
+      .arprot (mem_axi_arprot),
+
+      .rvalid(axi_mem_rvalid),
+      .rready(mem_axi_rready),
+      .rdata (axi_mem_rdata),
+
+      .clk(clk),
+      .resetn(resetn)
+  );
+
+  assign mem_axi_awready = axi_uart_awready | axi_mem_awready;
+  assign mem_axi_wready  = axi_uart_wready | axi_mem_wready;
+  assign mem_axi_bvalid  = axi_uart_bvalid | axi_mem_bvalid;
+  assign mem_axi_arready = axi_uart_arready | axi_mem_arready;
+  assign mem_axi_rvalid  = axi_uart_rvalid | axi_mem_rvalid;
+  assign mem_axi_rdata   = axi_uart_rvalid ? axi_uart_rdata : axi_mem_rdata;
+endmodule
+
+module axi_memory #(
+    parameter START_ADDRESS = 32'h1000_0000,
+    parameter MEM_SIZE = 4096
+) (
+    input clk,
+    input resetn,
+
+    input               awvalid,
+    output logic        awready,
+    input        [31:0] awaddr,
+    input        [ 2:0] awprot,
+
+    input               wvalid,
+    output logic        wready,
+    input        [31:0] wdata,
+    input        [ 3:0] wstrb,
+
+    output logic bvalid,
+    input        bready,
+
+    input               arvalid,
+    output logic        arready,
+    input        [31:0] araddr,
+    input        [ 2:0] arprot,
+
+    output logic        rvalid,
+    input               rready,
+    output logic [31:0] rdata
+
+);
+  localparam END_ADDRESS = START_ADDRESS + MEM_SIZE;
+  reg [31:0] mem[0:MEM_SIZE-1];
+  initial $readmemh("firmware.hex", mem);
+
+  typedef enum bit [1:0] {
+    IDLE,
+    PUT_DATA,
+    READ_DATA,
+    RESPOND
+  } state_t;
+  state_t state, state_next;
+
+  always_ff @(posedge clk or negedge resetn) begin
+    if (~resetn) begin
+      state <= IDLE;
+    end else begin
+      state <= state_next;
+    end
+  end
+
+  always_comb begin
+    state_next = state;
+    bvalid = 0;
+    awready = 0;
+    arready = 0;
+    wready = 0;
+    rvalid = 0;
+    case (state)
+      IDLE: begin
+        if (awvalid & (awaddr >= START_ADDRESS) & (awaddr < END_ADDRESS)) begin
+          awready = 1;
+          state_next = PUT_DATA;
+        end else if (arvalid) begin
+          arready = 1;
+          state_next = READ_DATA;
+        end
+      end
+      PUT_DATA: begin
+        wready = 1;
+        if (wvalid) begin
+          if (wstrb[0]) mem[awaddr][7:0] = wdata[7:0];
+          if (wstrb[1]) mem[awaddr][15:8] = wdata[15:8];
+          if (wstrb[2]) mem[awaddr][23:16] = wdata[23:16];
+          if (wstrb[3]) mem[awaddr][31:24] = wdata[31:24];
+          state_next = RESPOND;
+        end
+      end
+      READ_DATA: begin
+        if (rready) begin
+          rvalid = 1;
+          rdata = mem[araddr];
+          state_next = IDLE;
+        end
+      end
+      RESPOND: begin
+        if (bready) begin
+          bvalid = 1;
+          state_next = IDLE;
+        end
+      end
+    endcase
+  end
 endmodule
 
 module axi_uart #(
@@ -126,9 +319,9 @@ module axi_uart #(
     input  [31:0] araddr,
     input  [ 2:0] arprot,
 
-    output        rvalid,
-    input         rready,
-    output [31:0] rdata,
+    output logic        rvalid,
+    input               rready,
+    output       [31:0] rdata,
 
     output tx_out
 );
@@ -193,6 +386,8 @@ module axi_uart #(
     uart_wr_en_next = 0;
     wready_next = 0;
     bvalid = 0;
+    // TODO: implement this
+    rvalid = 0;
     case (state)
       IDLE: begin
         response_buf = 0;
